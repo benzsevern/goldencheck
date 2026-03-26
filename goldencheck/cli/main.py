@@ -618,6 +618,20 @@ def agent_serve(
     asyncio.run(run_a2a_server(port=port))
 
 
+@app.command()
+def demo(
+    no_tui: bool = typer.Option(False, "--no-tui", help="Print results to stdout."),
+    domain: Optional[str] = typer.Option(None, "--domain", help="Domain pack to apply."),
+) -> None:
+    """Run GoldenCheck on built-in sample data to see it in action."""
+    from goldencheck.cli.demo_data import generate_demo_csv
+
+    path = generate_demo_csv()
+    typer.echo(f"Generated demo data: {path}")
+    typer.echo("Scanning for data quality issues...\n")
+    _do_scan(path, no_tui=True, json_output=False, domain=domain)
+
+
 def _do_scan(
     file: Path,
     *,
