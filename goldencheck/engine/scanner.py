@@ -3,7 +3,11 @@ from __future__ import annotations
 import dataclasses
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 import polars as pl
+
+if TYPE_CHECKING:
+    from goldencheck.baseline.models import BaselineProfile
 from goldencheck.engine.reader import read_file
 from goldencheck.engine.sampler import maybe_sample
 from goldencheck.engine.confidence import apply_corroboration_boost

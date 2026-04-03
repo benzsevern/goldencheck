@@ -124,6 +124,20 @@ class BaselineProfile(BaseModel):
             name = self.source.replace("\\", "/").split("/")[-1]
         return name
 
+    @property
+    def confidence_priors(self) -> dict[str, dict[str, "ConfidencePrior"]]:
+        """Return priors as a nested dict ``{check: {column: ConfidencePrior}}``.
+
+        The flat ``priors`` field stores keys as ``"check:col"``.  This property
+        unpacks them into the nested form expected by :func:`~goldencheck.baseline.priors.apply_prior`.
+        """
+        nested: dict[str, dict[str, ConfidencePrior]] = {}
+        for key, prior in self.priors.items():
+            if ":" in key:
+                check, col = key.split(":", 1)
+                nested.setdefault(check, {})[col] = prior
+        return nested
+
     # ------------------------------------------------------------------
     # Serialisation helpers (private)
     # ------------------------------------------------------------------
