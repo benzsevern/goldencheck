@@ -1,12 +1,9 @@
 """Tests for goldencheck.drift.detector — TDD drift detection."""
 from __future__ import annotations
 
-import math
-from datetime import datetime, timezone
 
 import numpy as np
 import polars as pl
-import pytest
 
 from goldencheck.baseline.models import (
     BaselineProfile,
@@ -190,7 +187,6 @@ def test_no_bound_violation_within_bounds():
 
 def test_detects_entropy_drift():
     """Should flag WARNING when entropy shifts significantly."""
-    rng = _rng()
     # Baseline: wide spread → high entropy. Current: all clustered at 1 value → near 0
     values = [1.0] * 450 + [2.0] * 50
     df = pl.DataFrame({"status_code": values})
