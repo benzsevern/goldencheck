@@ -40,6 +40,16 @@ try:
 except ImportError:
     _agent_exports = []
 
+def __getattr__(name: str):
+    if name == "create_baseline":
+        from goldencheck.baseline import create_baseline
+        return create_baseline
+    if name == "load_baseline":
+        from goldencheck.baseline import load_baseline
+        return load_baseline
+    raise AttributeError(f"module 'goldencheck' has no attribute {name!r}")
+
+
 __all__ = [
     # Core
     "scan_file",
@@ -76,6 +86,9 @@ __all__ = [
     # Semantic
     "classify_columns",
     "list_available_domains",
+    # Baseline
+    "create_baseline",
+    "load_baseline",
     # Agent (optional)
     *_agent_exports,
 ]
