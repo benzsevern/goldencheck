@@ -487,6 +487,104 @@ def test_metadata_has_required_keys():
 
 
 # ---------------------------------------------------------------------------
+# Benford drift
+# ---------------------------------------------------------------------------
+
+
+def test_detects_benford_drift():
+    """Should flag WARNING when Benford conformance flips from passing to failing."""
+    rng = _rng()
+    # Baseline: conforms to Benford (high p-value means no significant deviation)
+    sp = StatProfile(
+        distribution=None,
+        params=None,
+        benford={"chi2_pvalue": 0.85},  # baseline conformed (p >= 0.05)
+        entropy=5.0,
+        bounds={"min": 1.0, "max": 1_000_000.0, "p01": 1.0, "p99": 999_999.0},
+    )
+    baseline = _make_baseline(stat_profiles={"total_amount": sp})
+
+    # Current: uniform values that do NOT follow Benford's law
+    # All values start with digit 5 — violates Benford's distribution
+    values = rng.uniform(500_000, 599_999, size=500).tolist()
+    df = pl.DataFrame({"total_amount": values})
+
+    findings = run_drift_checks(df, baseline)
+    benford_findings = [f for f in findings if f.check == "benford_drift"]
+    assert len(benford_findings) >= 1
+    f = benford_findings[0]
+    assert f.severity == Severity.WARNING
+    assert f.column == "total_amount"
+    assert f.source == "baseline_drift"
+    assert f.metadata["drift_type"] == "benford_drift"
+
+
+# ---------------------------------------------------------------------------
+# New correlation
+# ---------------------------------------------------------------------------
+
+
+def test_detects_new_correlation():
+    """Should flag INFO when a new strong correlation appears not in baseline."""
+    # Baseline has no correlations
+    baseline = _make_baseline(correlations=[], columns=["x", "y"])
+
+    # Current: perfectly correlated
+    rng = _rng()
+    x = rng.normal(0, 1, 300).tolist()
+    y = [v * 2.0 + 1.0 for v in x]  # y = 2x + 1, perfect linear correlation
+    df = pl.DataFrame({"x": x, "y": y})
+
+    findings = run_drift_checks(df, baseline)
+    new_corr_findings = [f for f in findings if f.check == "new_correlation"]
+    assert len(new_corr_findings) >= 1
+    f = new_corr_findings[0]
+    assert f.severity == Severity.INFO
+    assert f.source == "baseline_drift"
+    assert f.metadata["drift_type"] == "new_correlation"
+
+
+# ---------------------------------------------------------------------------
+# Type drift (positive)
+# ---------------------------------------------------------------------------
+
+
+def test_detects_type_drift():
+    """Should flag WARNING when a column's semantic type changes."""
+    # Baseline says 'contact' is an email column
+    baseline = _make_baseline(semantic_types={"contact": "email"})
+
+    # Current: 'contact' now contains phone numbers — keyword matcher should
+    # classify it as 'phone' since the values look like phone numbers and the
+    # column name 'contact' doesn't match email keywords.
+    df = pl.DataFrame({
+        "contact": ["555-1234", "555-5678", "555-9012", "555-3456", "555-7890"] * 20,
+    })
+
+    findings = run_drift_checks(df, baseline)
+    _ = [f for f in findings if f.check == "type_drift"]
+    # The keyword matcher classifies "contact" as neither email nor phone
+    # (no email/phone keyword in "contact"), so current_type will be None
+    # and no drift is flagged. Instead, use a column name with a phone keyword.
+
+    # Re-test with a column name that triggers phone classification
+    baseline2 = _make_baseline(semantic_types={"phone_contact": "email"})
+    df2 = pl.DataFrame({
+        "phone_contact": ["555-1234", "555-5678", "555-9012"] * 20,
+    })
+    findings2 = run_drift_checks(df2, baseline2)
+    type_findings2 = [f for f in findings2 if f.check == "type_drift"]
+    assert len(type_findings2) >= 1
+    f = type_findings2[0]
+    assert f.severity == Severity.WARNING
+    assert f.column == "phone_contact"
+    assert f.source == "baseline_drift"
+    assert f.metadata["drift_type"] == "type_drift"
+    assert f.metadata["baseline_type"] == "email"
+    assert f.metadata["current_type"] == "phone"
+
+
+# ---------------------------------------------------------------------------
 # Empty / missing columns
 # ---------------------------------------------------------------------------
 

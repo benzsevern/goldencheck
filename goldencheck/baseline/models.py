@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -250,17 +251,19 @@ class BaselineProfile(BaseModel):
     # Public save / load
     # ------------------------------------------------------------------
 
-    def save(self, path: str) -> None:
+    def save(self, path: Path | str) -> None:
         """Serialise this profile to YAML at *path*."""
         data = self._to_dict()
         with open(path, "w", encoding="utf-8") as fh:
             yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False)
 
     @classmethod
-    def load(cls, path: str) -> BaselineProfile:
+    def load(cls, path: Path | str) -> BaselineProfile:
         """Load a BaselineProfile from a YAML file, ignoring unknown keys."""
         with open(path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected a YAML mapping in {path!r}, got {type(data).__name__}")
         return cls._from_dict(data)
 
     # ------------------------------------------------------------------

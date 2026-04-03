@@ -732,26 +732,27 @@ def baseline(
     update: bool = typer.Option(False, "--update", help="Update existing baseline"),
 ) -> None:
     """Create a deep profiling baseline for drift detection."""
-    try:
-        from goldencheck.baseline import create_baseline, load_baseline
-    except ImportError:
-        console.print("[red]Install goldencheck[baseline]: pip install goldencheck[baseline][/]")
-        raise typer.Exit(1)
+    with _cli_error_handler():
+        try:
+            from goldencheck.baseline import create_baseline, load_baseline
+        except ImportError:
+            console.print("[red]Install goldencheck[baseline]: pip install goldencheck[baseline][/]")
+            raise typer.Exit(1)
 
-    out_path = output or Path("goldencheck_baseline.yaml")
+        out_path = output or Path("goldencheck_baseline.yaml")
 
-    if update and out_path.exists():
-        console.print(f"[yellow]Updating existing baseline: {out_path}[/]")
-        existing = load_baseline(out_path)
-        new_baseline = create_baseline(file, source=str(file), skip=skip)
-        existing.update_from(new_baseline)
-        existing.save(out_path)
-    else:
-        console.print(f"[cyan]Creating baseline for {file}...[/]")
-        profile = create_baseline(file, source=str(file), skip=skip)
-        profile.save(out_path)
+        if update and out_path.exists():
+            console.print(f"[yellow]Updating existing baseline: {out_path}[/]")
+            existing = load_baseline(out_path)
+            new_baseline = create_baseline(file, skip=skip)
+            existing.update_from(new_baseline)
+            existing.save(out_path)
+        else:
+            console.print(f"[cyan]Creating baseline for {file}...[/]")
+            profile = create_baseline(file, skip=skip)
+            profile.save(out_path)
 
-    console.print(f"[green]Baseline saved to {out_path}[/]")
+        console.print(f"[green]Baseline saved to {out_path}[/]")
 
 
 def _do_scan(
@@ -783,6 +784,7 @@ def _do_scan(
                     if candidate.exists():
                         from goldencheck.baseline import load_baseline
                         baseline = load_baseline(candidate)
+                        console.print(f"[dim]Using auto-detected baseline: {candidate}[/]", highlight=False)
                         break
 
         if llm_boost:

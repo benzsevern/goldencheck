@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 from typing import TYPE_CHECKING
 
 try:
@@ -19,6 +20,8 @@ from goldencheck.baseline.models import CorrelationEntry
 
 if TYPE_CHECKING:
     pass
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["analyze_correlations", "_cramers_v"]
 
@@ -98,7 +101,8 @@ def _cramers_v(df: pl.DataFrame, col_a: str, col_b: str) -> CorrelationEntry | N
             .pivot(on=col_b, index=col_a, values="_cnt")
             .fill_null(0)
         )
-    except Exception:
+    except Exception as exc:
+        logger.debug("Contingency table failed for (%s, %s): %s", col_a, col_b, exc)
         return None
 
     # Extract numeric matrix (drop the index column)
@@ -113,7 +117,8 @@ def _cramers_v(df: pl.DataFrame, col_a: str, col_b: str) -> CorrelationEntry | N
 
     try:
         chi2, _, _, _ = chi2_contingency(matrix)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Chi2 contingency failed for (%s, %s): %s", col_a, col_b, exc)
         return None
 
     n = int(matrix.sum())
@@ -184,7 +189,8 @@ def analyze_correlations(df: pl.DataFrame) -> list[CorrelationEntry]:
             results.append(entry)
 
     # --- Categorical-categorical pairs ---
-    remaining_budget = _MAX_PAIRS - len(num_pairs)
+    num_evaluated = min(len(num_pairs), _MAX_PAIRS)
+    remaining_budget = _MAX_PAIRS - num_evaluated
     if remaining_budget > 0:
         cat_pairs = list(itertools.combinations(categorical_cols, 2))
         for col_a, col_b in cat_pairs[:remaining_budget]:

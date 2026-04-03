@@ -1,11 +1,15 @@
 """Constraint mining: functional dependencies, candidate keys, temporal orders."""
 from __future__ import annotations
 
+import logging
+
 import polars as pl
 
 from goldencheck.baseline.models import FunctionalDependency, TemporalOrder
 
 __all__ = ["mine_constraints"]
+
+logger = logging.getLogger(__name__)
 
 # Maximum number of columns to consider (prevents O(n^2) blowup on wide tables).
 _MAX_COLS = 30
@@ -153,10 +157,10 @@ def _mine_temporal_orders(
     for i, col_a in enumerate(present):
         for col_b in present[i + 1 :]:
             try:
-                a = df[col_a].cast(pl.Date)
-                b = df[col_b].cast(pl.Date)
-            except Exception:
-                # Non-parseable date columns — skip this pair.
+                a = df[col_a].cast(pl.Datetime) if df[col_a].dtype not in (pl.Date, pl.Datetime) else df[col_a]
+                b = df[col_b].cast(pl.Datetime) if df[col_b].dtype not in (pl.Date, pl.Datetime) else df[col_b]
+            except Exception as exc:
+                logger.debug("Date cast failed for (%s, %s): %s", col_a, col_b, exc)
                 continue
 
             # Drop rows where either value is null.

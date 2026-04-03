@@ -1,6 +1,7 @@
 """Statistical profiler — distributions, Benford's law, entropy, percentile bounds."""
 from __future__ import annotations
 
+import logging
 import math
 from collections import Counter
 from typing import TYPE_CHECKING
@@ -20,6 +21,8 @@ from goldencheck.baseline.models import StatProfile
 
 if TYPE_CHECKING:
     pass
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["profile_statistical"]
 
@@ -151,7 +154,8 @@ def _fit_distribution(values: np.ndarray) -> tuple[str | None, dict | None]:
         try:
             fit_params = dist.fit(values)  # type: ignore[attr-defined]
             _stat, pvalue = _stats.kstest(values, dist.name, args=fit_params)  # type: ignore[attr-defined]
-        except Exception:
+        except Exception as exc:
+            logger.debug("Distribution fit failed for %s: %s", name, exc)
             continue
 
         if pvalue < _KS_MIN_PVALUE:
@@ -159,7 +163,8 @@ def _fit_distribution(values: np.ndarray) -> tuple[str | None, dict | None]:
 
         try:
             loglik = float(np.sum(dist.logpdf(values, *fit_params)))  # type: ignore[attr-defined]
-        except Exception:
+        except Exception as exc:
+            logger.debug("Log-likelihood computation failed for %s: %s", name, exc)
             continue
 
         k = len(fit_params)

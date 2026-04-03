@@ -161,7 +161,8 @@ def _infer_with_embeddings(df: pl.DataFrame) -> dict[str, list[str]]:  # noqa: P
             col = df[col_name].drop_nulls()
             if len(col) > 0:
                 samples = [str(v) for v in col.head(5).to_list()]
-        except Exception:
+        except Exception as exc:
+            logger.debug("Sample extraction failed for %s: %s", col_name, exc)
             pass
 
         query_text = col_name.replace("_", " ")

@@ -1,6 +1,8 @@
 """Drift detector — compare a current DataFrame against a saved BaselineProfile."""
 from __future__ import annotations
 
+import itertools
+import logging
 import math
 from collections import Counter
 from typing import Any
@@ -21,6 +23,8 @@ from goldencheck.baseline.semantic import infer_semantic_types
 from goldencheck.models.finding import Finding, Severity
 
 __all__ = ["run_drift_checks"]
+
+logger = logging.getLogger(__name__)
 
 _SOURCE = "baseline_drift"
 
@@ -139,7 +143,8 @@ def _check_distribution_drift(col: str, series: pl.Series, sp: Any) -> list[Find
 
     try:
         _stat, pvalue = _stats.kstest(values, dist_obj.name, args=fit_params)
-    except Exception:
+    except Exception as exc:
+        logger.debug("KS-test failed for %s: %s", col, exc)
         return []
 
     if pvalue < _KS_ERROR_PVALUE:
@@ -298,7 +303,8 @@ def _check_benford_drift(col: str, series: pl.Series, sp: Any) -> list[Finding]:
     # Check 2 orders of magnitude
     try:
         span = float(np.log10(np.max(values)) - np.log10(np.min(values)))
-    except Exception:
+    except Exception as exc:
+        logger.debug("Benford span computation failed for %s: %s", col, exc)
         return []
     if span < 2.0:
         return []
@@ -347,7 +353,8 @@ def _compute_benford_pvalue(values: np.ndarray) -> float | None:
     try:
         _chi2, pvalue = _stats.chisquare(f_obs=observed, f_exp=expected)
         return float(pvalue)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Benford chi-square test failed: %s", exc)
         return None
 
 
@@ -390,7 +397,8 @@ def _check_fd_violations(df: pl.DataFrame, baseline: BaselineProfile) -> list[Fi
                 .agg(pl.col("_cnt").max().alias("_mode_cnt"))
             )
             consistent_count = int(grouped["_mode_cnt"].sum())
-        except Exception:
+        except Exception as exc:
+            logger.debug("FD violation check failed for %s -> %s: %s", dets, deps, exc)
             continue
 
         current_confidence = consistent_count / n_rows
@@ -444,7 +452,8 @@ def _check_key_uniqueness(df: pl.DataFrame, baseline: BaselineProfile) -> list[F
             n_unique = sub.n_unique()
             null_count = sub.null_count().row(0)
             has_nulls = any(nc > 0 for nc in null_count)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Key uniqueness check failed for %s: %s", key_cols, exc)
             continue
 
         if n_unique == n_rows and not has_nulls:
@@ -484,9 +493,10 @@ def _check_temporal_order_drift(df: pl.DataFrame, baseline: BaselineProfile) -> 
             continue
 
         try:
-            a = df[col_before].cast(pl.Date)
-            b = df[col_after].cast(pl.Date)
-        except Exception:
+            a = df[col_before].cast(pl.Datetime) if df[col_before].dtype not in (pl.Date, pl.Datetime) else df[col_before]
+            b = df[col_after].cast(pl.Datetime) if df[col_after].dtype not in (pl.Date, pl.Datetime) else df[col_after]
+        except Exception as exc:
+            logger.debug("Temporal cast failed for (%s, %s): %s", col_before, col_after, exc)
             continue
 
         tmp = pl.DataFrame({"a": a, "b": b}).drop_nulls()
@@ -647,15 +657,14 @@ def _check_correlations(df: pl.DataFrame, baseline: BaselineProfile) -> list[Fin
         and c in (baseline.columns or df.columns)
     ]
 
-    import itertools
     checked = 0
     for col_a, col_b in itertools.combinations(numeric_cols, 2):
         if checked >= 200:
             break
-        checked += 1
         key = tuple(sorted([col_a, col_b]))  # type: ignore[assignment]
         if key in baseline_lookup:
             continue
+        checked += 1
         # Not in baseline — check if currently strongly correlated
         current_value = _compute_correlation(df, col_a, col_b, "pearson")
         if current_value is not None and abs(current_value) >= _CORR_STRONG_THRESHOLD:
@@ -695,7 +704,8 @@ def _compute_correlation(
                 return None
             corr, _ = _stats.pearsonr(a_vals, b_vals)
             return float(corr) if np.isfinite(corr) else None
-        except Exception:
+        except Exception as exc:
+            logger.debug("Pearson correlation failed for (%s, %s): %s", col_a, col_b, exc)
             return None
 
     if measure == "cramers_v":
