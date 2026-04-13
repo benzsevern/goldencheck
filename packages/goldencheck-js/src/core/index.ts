@@ -57,9 +57,12 @@ export { applyCorroborationBoost, applyConfidenceDowngrade } from "./engine/conf
 export { applyFixes, type FixEntry, type FixReport } from "./engine/fixer.js";
 export { diffData, formatDiffReport, type DiffReport, type SchemaChange, type FindingChange, type StatChange } from "./engine/differ.js";
 export { autoTriage, type TriageResult } from "./engine/triage.js";
-export { recordScan, loadHistory, getPreviousScan, type ScanRecord } from "./engine/history.js";
-export { shouldNotify, sendWebhook } from "./engine/notifier.js";
-export { runSchedule, type ScheduleOptions } from "./engine/scheduler.js";
+// NOTE: history.ts, scheduler.ts, notifier.ts are in core/engine/ but use node:fs —
+// they export types (ScanRecord, ScheduleOptions) that are edge-safe,
+// but the functions (recordScan, loadHistory, runSchedule) require Node.
+// Re-export only the types here; function re-exports live in node/index.ts.
+export type { ScanRecord } from "./engine/history.js";
+export type { ScheduleOptions } from "./engine/scheduler.js";
 
 // Agent
 export {

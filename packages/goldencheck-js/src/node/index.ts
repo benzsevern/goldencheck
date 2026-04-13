@@ -21,5 +21,10 @@ export { renderTui } from "./tui/app.js";
 // Node-only: database scanner
 export { scanDatabase } from "./db-scanner.js";
 
+// Node-only: history, scheduler, notifier (use node:fs / process signals)
+export { recordScan, loadHistory, getPreviousScan } from "../core/engine/history.js";
+export { shouldNotify, sendWebhook } from "../core/engine/notifier.js";
+export { runSchedule } from "../core/engine/scheduler.js";
+
 // Node-only: A2A server
 export { runA2aServer } from "./a2a/server.js";

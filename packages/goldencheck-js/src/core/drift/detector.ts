@@ -333,8 +333,12 @@ function checkBenfordDrift(
   if (positives.length < MIN_ROWS) return [];
 
   // Check 2+ orders of magnitude
-  const minPos = Math.min(...positives);
-  const maxPos = Math.max(...positives);
+  let minPos = positives[0]!;
+  let maxPos = positives[0]!;
+  for (let i = 1; i < positives.length; i++) {
+    if (positives[i]! < minPos) minPos = positives[i]!;
+    if (positives[i]! > maxPos) maxPos = positives[i]!;
+  }
   if (minPos <= 0) return [];
   const span = Math.log10(maxPos) - Math.log10(minPos);
   if (span < 2.0) return [];

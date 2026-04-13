@@ -205,18 +205,22 @@ export class TabularData {
       .slice(0, n);
   }
 
-  /** Min numeric value. */
+  /** Min numeric value. Safe for large arrays (no spread). */
   min(col: string): number | null {
     const nums = this.numericValues(col);
     if (nums.length === 0) return null;
-    return Math.min(...nums);
+    let m = nums[0]!;
+    for (let i = 1; i < nums.length; i++) if (nums[i]! < m) m = nums[i]!;
+    return m;
   }
 
-  /** Max numeric value. */
+  /** Max numeric value. Safe for large arrays (no spread). */
   max(col: string): number | null {
     const nums = this.numericValues(col);
     if (nums.length === 0) return null;
-    return Math.max(...nums);
+    let m = nums[0]!;
+    for (let i = 1; i < nums.length; i++) if (nums[i]! > m) m = nums[i]!;
+    return m;
   }
 
   /** Mean of numeric values. */

@@ -20,7 +20,9 @@ export function parseLlmResponse(raw: string): LLMResponse | null {
   let data: unknown;
   try {
     data = JSON.parse(cleaned);
-  } catch {
+  } catch (e) {
+    console.warn("Failed to parse LLM response as JSON:", e instanceof Error ? e.message : String(e));
+    console.warn("Raw response (first 500 chars):", cleaned.slice(0, 500));
     return null;
   }
 

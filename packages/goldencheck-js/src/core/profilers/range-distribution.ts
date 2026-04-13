@@ -34,8 +34,12 @@ export class RangeDistributionProfiler implements Profiler {
 
     const m = statMean(nums)!;
     const s = statStd(nums);
-    const colMin = Math.min(...nums);
-    const colMax = Math.max(...nums);
+    let colMin = nums[0]!;
+    let colMax = nums[0]!;
+    for (let i = 1; i < nums.length; i++) {
+      if (nums[i]! < colMin) colMin = nums[i]!;
+      if (nums[i]! > colMax) colMax = nums[i]!;
+    }
 
     findings.push(
       makeFinding({

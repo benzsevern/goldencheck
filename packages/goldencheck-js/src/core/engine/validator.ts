@@ -126,34 +126,30 @@ function checkColumn(
     }
   }
 
-  // Range check
+  // Range check — no try/catch; isNullish + Number.isFinite guards handle non-numeric safely
   if (rule.range && rule.range.length === 2) {
     const [lo, hi] = rule.range;
-    try {
-      const outOfRange: string[] = [];
-      for (const v of data.column(name)) {
-        if (isNullish(v)) continue;
-        const n = typeof v === "number" ? v : Number(v);
-        if (!Number.isFinite(n)) continue;
-        if (n < lo || n > hi) {
-          outOfRange.push(String(v));
-        }
+    const outOfRange: string[] = [];
+    for (const v of data.column(name)) {
+      if (isNullish(v)) continue;
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isFinite(n)) continue;
+      if (n < lo || n > hi) {
+        outOfRange.push(String(v));
       }
-      if (outOfRange.length > 0) {
-        const samples = outOfRange.slice(0, 5);
-        findings.push(
-          makeFinding({
-            severity: Severity.ERROR,
-            column: name,
-            check: "range",
-            message: `${outOfRange.length} values outside range [${lo}, ${hi}]`,
-            affectedRows: outOfRange.length,
-            sampleValues: samples,
-          }),
-        );
-      }
-    } catch {
-      // Non-numeric column — skip range check silently
+    }
+    if (outOfRange.length > 0) {
+      const samples = outOfRange.slice(0, 5);
+      findings.push(
+        makeFinding({
+          severity: Severity.ERROR,
+          column: name,
+          check: "range",
+          message: `${outOfRange.length} values outside range [${lo}, ${hi}]`,
+          affectedRows: outOfRange.length,
+          sampleValues: samples,
+        }),
+      );
     }
   }
 

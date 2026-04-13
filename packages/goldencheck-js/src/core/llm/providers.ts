@@ -82,8 +82,13 @@ async function callAnthropic(model: string, userPrompt: string): Promise<LlmCall
     usage: { input_tokens: number; output_tokens: number };
   };
 
+  const text = data.content[0]?.text;
+  if (!text) {
+    throw new Error("Anthropic returned empty response content — the request may have been filtered or the model produced no output");
+  }
+
   return {
-    text: data.content[0]?.text ?? "",
+    text,
     inputTokens: data.usage.input_tokens,
     outputTokens: data.usage.output_tokens,
   };
@@ -122,8 +127,13 @@ async function callOpenai(model: string, userPrompt: string): Promise<LlmCallRes
     usage: { prompt_tokens: number; completion_tokens: number };
   };
 
+  const text = data.choices[0]?.message?.content;
+  if (!text) {
+    throw new Error("OpenAI returned empty response content — the request may have been filtered or the model produced no output");
+  }
+
   return {
-    text: data.choices[0]?.message?.content ?? "",
+    text,
     inputTokens: data.usage.prompt_tokens,
     outputTokens: data.usage.completion_tokens,
   };

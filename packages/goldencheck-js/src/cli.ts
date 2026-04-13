@@ -109,8 +109,8 @@ program
       const outPath = opts["output"] as string;
       writeFileSync(outPath, serializeBaseline(baseline));
       console.log(`Baseline saved to ${outPath}`);
-    } catch {
-      console.error("Baseline creation failed. Ensure baseline module is available.");
+    } catch (e) {
+      console.error("Baseline creation failed:", e instanceof Error ? e.message : String(e));
       process.exit(1);
     }
   });

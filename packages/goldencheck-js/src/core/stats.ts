@@ -162,6 +162,9 @@ export function ksTwoSample(
     if (diff > maxD) maxD = diff;
   }
 
+  // Short-circuit: identical distributions → p-value = 1
+  if (maxD === 0) return { statistic: 0, pValue: 1 };
+
   // Approximate p-value using asymptotic formula
   const en = Math.sqrt((n1 * n2) / (n1 + n2));
   const lambda = (en + 0.12 + 0.11 / en) * maxD;
@@ -237,7 +240,9 @@ export function benfordExpected(): readonly number[] {
 
 /**
  * Seedable pseudo-random number generator (Mulberry32).
- * Produces the same sequence as Python's random.Random(seed) for sampling.
+ * NOTE: This uses a different algorithm than Python's Mersenne Twister,
+ * so sampling results will differ from the Python version. Both are
+ * deterministic with the same seed within their respective implementations.
  */
 export function createRng(seed: number): () => number {
   let state = seed | 0;

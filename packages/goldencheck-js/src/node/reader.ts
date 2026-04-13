@@ -47,17 +47,18 @@ export function readCsv(path: string, options?: ReadOptions): TabularData {
 }
 
 function readParquet(path: string): TabularData {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  let pl: typeof import("nodejs-polars");
   try {
-    // Dynamic import — nodejs-polars is optional peer dep
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pl = require("nodejs-polars") as typeof import("nodejs-polars");
-    const df = pl.readParquet(path);
-    return polarsToTabular(df);
+    pl = require("nodejs-polars") as typeof import("nodejs-polars");
   } catch {
     throw new Error(
       "Parquet support requires nodejs-polars. Install with: npm install nodejs-polars",
     );
   }
+  // Let readParquet errors (corrupt file, permission denied) propagate naturally
+  const df = pl.readParquet(path);
+  return polarsToTabular(df);
 }
 
 function readExcel(_path: string): TabularData {
@@ -71,6 +72,21 @@ function readExcel(_path: string): TabularData {
 function polarsToTabular(df: { toRecords(): Record<string, unknown>[] }): TabularData {
   const records = df.toRecords();
   return new TabularData(records as Row[]);
+}
+
+// --- Value coercion (matches Polars CSV auto-inference) ---
+
+/** Coerce a CSV string value to its most specific JS type. */
+function coerceValue(raw: string): string | number | boolean {
+  // Boolean
+  if (raw === "true" || raw === "True" || raw === "TRUE") return true;
+  if (raw === "false" || raw === "False" || raw === "FALSE") return false;
+  // Numeric — only if the entire string is a valid number (not empty, not whitespace-padded)
+  if (raw.length > 0 && raw === raw.trim()) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && raw !== "") return n;
+  }
+  return raw;
 }
 
 // --- Built-in RFC 4180 CSV parser ---
@@ -87,9 +103,10 @@ function parseCsv(content: string, separator?: string): Row[] {
     const line = lines[i]!;
     if (line.trim() === "") continue;
     const values = parseRow(line, sep);
-    const row: Record<string, string | null> = {};
+    const row: Record<string, string | number | boolean | null> = {};
     for (let j = 0; j < header.length; j++) {
-      row[header[j]!] = j < values.length ? (values[j] ?? null) : null;
+      const raw = j < values.length ? (values[j] ?? null) : null;
+      row[header[j]!] = raw !== null ? coerceValue(raw) : null;
     }
     rows.push(row);
   }

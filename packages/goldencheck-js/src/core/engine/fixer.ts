@@ -143,7 +143,7 @@ export function applyFixes(
     }
   }
 
-  const totalRowsFixed = new Set(entries.flatMap((e) => e.sampleBefore)).size || entries.reduce((s, e) => s + e.rowsAffected, 0);
+  const totalRowsFixed = entries.reduce((s, e) => s + e.rowsAffected, 0);
 
   return {
     data: new TabularData(rows),

@@ -117,7 +117,7 @@ export class NullCorrelationProfiler implements RelationProfiler {
         if (group.length < 2) continue;
         const sorted = [...group].sort();
         const groupStr = sorted.map((c) => `'${c}'`).join(", ");
-        const totalNulls = Math.max(...sorted.map((c) => nullCounts.get(c) ?? 0));
+        const totalNulls = sorted.reduce((m, c) => Math.max(m, nullCounts.get(c) ?? 0), 0);
         const confidence = group.length >= 3 ? 0.8 : 0.5;
 
         allGroupFindings.push(

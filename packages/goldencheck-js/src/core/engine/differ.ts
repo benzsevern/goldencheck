@@ -73,54 +73,67 @@ export function diffData(
     }
   }
 
-  // Finding changes — match by (column, check)
-  const oldMap = new Map<string, Finding>();
-  for (const f of oldFindings) oldMap.set(`${f.column}|${f.check}`, f);
-  const newMap = new Map<string, Finding>();
-  for (const f of newFindings) newMap.set(`${f.column}|${f.check}`, f);
+  // Finding changes — match by (column, check), supporting multiple per key
+  const oldGroups = new Map<string, Finding[]>();
+  for (const f of oldFindings) {
+    const key = `${f.column}|${f.check}`;
+    const arr = oldGroups.get(key);
+    if (arr) arr.push(f);
+    else oldGroups.set(key, [f]);
+  }
+  const newGroups = new Map<string, Finding[]>();
+  for (const f of newFindings) {
+    const key = `${f.column}|${f.check}`;
+    const arr = newGroups.get(key);
+    if (arr) arr.push(f);
+    else newGroups.set(key, [f]);
+  }
 
-  for (const [key, newF] of newMap) {
-    const oldF = oldMap.get(key);
-    if (!oldF) {
-      findingChanges.push({
-        type: "new",
-        column: newF.column,
-        check: newF.check,
-        newSeverity: severityName(newF.severity),
-        message: newF.message,
-      });
-    } else {
-      if (newF.severity > oldF.severity) {
+  for (const [key, newFs] of newGroups) {
+    const oldFs = oldGroups.get(key);
+    if (!oldFs) {
+      // All new
+      for (const newF of newFs) {
         findingChanges.push({
-          type: "worsened",
+          type: "new",
           column: newF.column,
           check: newF.check,
-          oldSeverity: severityName(oldF.severity),
-          newSeverity: severityName(newF.severity),
-          message: newF.message,
-        });
-      } else if (newF.severity < oldF.severity) {
-        findingChanges.push({
-          type: "improved",
-          column: newF.column,
-          check: newF.check,
-          oldSeverity: severityName(oldF.severity),
           newSeverity: severityName(newF.severity),
           message: newF.message,
         });
       }
+    } else {
+      // Compare by index (best-effort pairing)
+      const maxLen = Math.max(newFs.length, oldFs.length);
+      for (let i = 0; i < maxLen; i++) {
+        const newF = newFs[i];
+        const oldF = oldFs[i];
+        if (newF && !oldF) {
+          findingChanges.push({ type: "new", column: newF.column, check: newF.check, newSeverity: severityName(newF.severity), message: newF.message });
+        } else if (!newF && oldF) {
+          findingChanges.push({ type: "resolved", column: oldF.column, check: oldF.check, oldSeverity: severityName(oldF.severity), message: oldF.message });
+        } else if (newF && oldF) {
+          if (newF.severity > oldF.severity) {
+            findingChanges.push({ type: "worsened", column: newF.column, check: newF.check, oldSeverity: severityName(oldF.severity), newSeverity: severityName(newF.severity), message: newF.message });
+          } else if (newF.severity < oldF.severity) {
+            findingChanges.push({ type: "improved", column: newF.column, check: newF.check, oldSeverity: severityName(oldF.severity), newSeverity: severityName(newF.severity), message: newF.message });
+          }
+        }
+      }
     }
   }
 
-  for (const [key, oldF] of oldMap) {
-    if (!newMap.has(key)) {
-      findingChanges.push({
-        type: "resolved",
-        column: oldF.column,
-        check: oldF.check,
-        oldSeverity: severityName(oldF.severity),
-        message: oldF.message,
-      });
+  for (const [key, oldFs] of oldGroups) {
+    if (!newGroups.has(key)) {
+      for (const oldF of oldFs) {
+        findingChanges.push({
+          type: "resolved",
+          column: oldF.column,
+          check: oldF.check,
+          oldSeverity: severityName(oldF.severity),
+          message: oldF.message,
+        });
+      }
     }
   }
 

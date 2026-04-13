@@ -217,7 +217,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   if (url.pathname === "/tasks/send" && req.method === "POST") {
-    const body = JSON.parse(await readBody(req));
+    let body: any;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      jsonResponse(res, { error: "Invalid JSON in request body" }, 400);
+      return;
+    }
     const skillId = body.skill ?? body.skill_id;
     const params = body.params ?? body.message?.parts?.[0]?.content ?? {};
 
@@ -237,7 +243,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   if (url.pathname === "/tasks/sendSubscribe" && req.method === "POST") {
-    const body = JSON.parse(await readBody(req));
+    let body: any;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      jsonResponse(res, { error: "Invalid JSON in request body" }, 400);
+      return;
+    }
     const skillId = body.skill ?? body.skill_id;
     const params = body.params ?? {};
 
