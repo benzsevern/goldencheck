@@ -1,367 +1,625 @@
 /**
- * Drift detector — 13 checks against saved baseline.
- * Port of goldencheck/drift/detector.py.
+ * Drift detector — compare current data against a saved BaselineProfile.
+ * TypeScript port of goldencheck/drift/detector.py.
+ * Edge-safe: uses only stats.ts and baseline utilities, no external dependencies.
+ *
+ * Implements 13 drift checks:
+ *  1. distribution_drift (KS-test)
+ *  2. entropy_drift (numeric)
+ *  3. entropy_drift (categorical)
+ *  4. bound_violation
+ *  5. benford_drift
+ *  6. fd_violation
+ *  7. key_uniqueness_loss
+ *  8. temporal_order_drift
+ *  9. pattern_drift
+ * 10. new_pattern
+ * 11. correlation_break
+ * 12. new_correlation
+ * 13. type_drift
  */
 
 import type { TabularData } from "../data.js";
 import { isNullish } from "../data.js";
-import { type Finding, Severity, makeFinding } from "../types.js";
-import {
-  ksTwoSample,
-  entropy as calcEntropy,
-  chiSquaredTest,
-  benfordExpected,
-  pearson,
-} from "../stats.js";
+import type { Finding } from "../types.js";
+import { Severity, makeFinding } from "../types.js";
 import type {
   BaselineProfile,
   StatProfile,
   CorrelationEntry,
-  PatternGrammar,
 } from "../baseline/models.js";
+import {
+  ksTwoSample,
+  entropy as shannonEntropy,
+  chiSquaredTest,
+  benfordExpected,
+  pearson,
+  cramersV,
+} from "../stats.js";
+import { induceColumnGrammars } from "../baseline/patterns.js";
 
-// Thresholds matching Python
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const SOURCE = "baseline_drift";
+
+// KS-test thresholds
 const KS_ERROR_PVALUE = 0.01;
 const KS_WARN_PVALUE = 0.05;
+
+// Entropy drift
 const ENTROPY_DELTA_WARN = 0.5;
-const BOUND_VIOLATION_RATE = 0.05;
+
+// Bound violation
+const BOUND_VIOLATION_RATE = 0.05; // 5%
+
+// FD violation
 const FD_VIOLATION_RATE = 0.05;
 const FD_VIOLATION_MULTIPLIER = 2.0;
+
+// Temporal order
 const TEMPORAL_VIOLATION_RATE = 0.05;
 const TEMPORAL_VIOLATION_MULTIPLIER = 2.0;
-const PATTERN_COVERAGE_DROP = 0.05;
+
+// Pattern drift
+const PATTERN_COVERAGE_DROP = 0.05; // 5pp
 const PATTERN_NEW_COVERAGE = 0.05;
+
+// Correlation
 const CORR_STRONG_THRESHOLD = 0.7;
 const CORR_DROP_THRESHOLD = 0.1;
 
+// Minimum rows for checks
+const MIN_ROWS = 30;
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 /**
- * Run all drift checks against a baseline profile.
+ * Compare data against a baseline and return all drift findings.
  * All findings have source="baseline_drift".
  */
-export function runDriftChecks(
-  data: TabularData,
-  baseline: BaselineProfile,
-): Finding[] {
+export function runDriftChecks(data: TabularData, baseline: BaselineProfile): Finding[] {
+  const findings: Finding[] = [];
+  findings.push(...checkStatistical(data, baseline));
+  findings.push(...checkConstraints(data, baseline));
+  findings.push(...checkPatterns(data, baseline));
+  findings.push(...checkCorrelations(data, baseline));
+  findings.push(...checkSemantic(data, baseline));
+  return findings;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: make a drift finding
+// ---------------------------------------------------------------------------
+
+function drift(
+  overrides: Partial<Finding> & Pick<Finding, "severity" | "column" | "check" | "message">,
+): Finding {
+  return makeFinding({ ...overrides, source: SOURCE });
+}
+
+// ---------------------------------------------------------------------------
+// Statistical checks
+// ---------------------------------------------------------------------------
+
+function checkStatistical(data: TabularData, baseline: BaselineProfile): Finding[] {
   const findings: Finding[] = [];
 
-  // Statistical checks per column
-  for (const [col, statProfile] of Object.entries(baseline.stats)) {
+  for (const [col, sp] of Object.entries(baseline.stats)) {
     if (!data.columns.includes(col)) continue;
 
-    findings.push(...checkDistributionDrift(data, col, statProfile));
-    findings.push(...checkEntropyDrift(data, col, statProfile));
-    findings.push(...checkBoundViolation(data, col, statProfile));
-    findings.push(...checkBenfordDrift(data, col, statProfile));
+    const dt = data.dtype(col);
+    const isNumeric = dt === "integer" || dt === "float";
+
+    if (isNumeric) {
+      const values = data.numericValues(col);
+      if (values.length < MIN_ROWS) continue;
+      const sorted = [...values].sort((a, b) => a - b);
+
+      findings.push(...checkDistributionDrift(col, sorted, sp));
+      findings.push(...checkEntropyDriftNumeric(col, values, sp));
+      findings.push(...checkBoundViolation(col, values, sp));
+      findings.push(...checkBenfordDrift(col, values, sp));
+    } else {
+      const values = data.stringValues(col);
+      if (values.length < MIN_ROWS) continue;
+      findings.push(...checkEntropyDriftCategorical(col, values, sp));
+    }
   }
 
-  // Constraint checks
+  return findings;
+}
+
+// --- 1. Distribution drift (KS-test) ---
+
+function checkDistributionDrift(
+  col: string,
+  sorted: number[],
+  sp: StatProfile,
+): Finding[] {
+  if (sp.distribution === null || Object.keys(sp.params).length === 0) return [];
+
+  const n = sorted.length;
+  let synthetic: number[];
+
+  switch (sp.distribution) {
+    case "normal": {
+      const loc = sp.params.loc ?? 0;
+      const scale = sp.params.scale ?? 1;
+      if (scale <= 0) return [];
+      synthetic = generateNormalSorted(n, loc, scale);
+      break;
+    }
+    case "log_normal": {
+      const s = sp.params.s ?? 1;
+      const scale = sp.params.scale ?? 1;
+      if (s <= 0 || scale <= 0) return [];
+      const logMean = Math.log(scale);
+      const logStd = s;
+      synthetic = generateLogNormalSorted(n, logMean, logStd);
+      break;
+    }
+    case "exponential": {
+      const loc = sp.params.loc ?? 0;
+      const scale = sp.params.scale ?? 1;
+      if (scale <= 0) return [];
+      synthetic = generateExponentialSorted(n, loc, scale);
+      break;
+    }
+    case "uniform": {
+      const loc = sp.params.loc ?? 0;
+      const scale = sp.params.scale ?? 1;
+      if (scale <= 0) return [];
+      synthetic = generateUniformSorted(n, loc, scale);
+      break;
+    }
+    default:
+      return [];
+  }
+
+  const ks = ksTwoSample(sorted, synthetic);
+  const pvalue = ks.pValue;
+
+  if (pvalue >= KS_WARN_PVALUE) return [];
+
+  const severity = pvalue < KS_ERROR_PVALUE ? Severity.ERROR : Severity.WARNING;
+  const prefix =
+    pvalue < KS_ERROR_PVALUE ? "Distribution drift" : "Possible distribution drift";
+
+  return [drift({
+    severity,
+    column: col,
+    check: "distribution_drift",
+    message:
+      `${prefix} detected on '${col}': KS-test p=${pvalue.toFixed(4)} ` +
+      `(baseline dist='${sp.distribution}'). Data no longer fits baseline distribution.`,
+    confidence: 0.9,
+    metadata: {
+      technique: "statistical",
+      drift_type: "distribution_drift",
+      ks_pvalue: pvalue,
+      baseline_distribution: sp.distribution,
+    },
+  })];
+}
+
+// --- 2. Entropy drift (numeric) ---
+
+function checkEntropyDriftNumeric(
+  col: string,
+  values: number[],
+  sp: StatProfile,
+): Finding[] {
+  if (sp.entropy === null) return [];
+
+  const currentEntropy = histogramEntropy(values);
+  const baselineEntropy = sp.entropy;
+  const delta = Math.abs(currentEntropy - baselineEntropy);
+
+  if (delta <= ENTROPY_DELTA_WARN) return [];
+
+  return [drift({
+    severity: Severity.WARNING,
+    column: col,
+    check: "entropy_drift",
+    message:
+      `Entropy drift on '${col}': baseline=${baselineEntropy.toFixed(3)}, ` +
+      `current=${currentEntropy.toFixed(3)}, delta=${delta.toFixed(3)}.`,
+    confidence: 0.8,
+    metadata: {
+      technique: "statistical",
+      drift_type: "entropy_drift",
+      baseline_entropy: baselineEntropy,
+      current_entropy: currentEntropy,
+      delta,
+    },
+  })];
+}
+
+// --- 3. Entropy drift (categorical) ---
+
+function checkEntropyDriftCategorical(
+  col: string,
+  values: string[],
+  sp: StatProfile,
+): Finding[] {
+  if (sp.entropy === null) return [];
+
+  const counts = new Map<string, number>();
+  for (const v of values) {
+    counts.set(v, (counts.get(v) ?? 0) + 1);
+  }
+  const currentEntropy = shannonEntropy(counts);
+  const baselineEntropy = sp.entropy;
+  const delta = Math.abs(currentEntropy - baselineEntropy);
+
+  if (delta <= ENTROPY_DELTA_WARN) return [];
+
+  return [drift({
+    severity: Severity.WARNING,
+    column: col,
+    check: "entropy_drift",
+    message:
+      `Entropy drift on '${col}': baseline=${baselineEntropy.toFixed(3)}, ` +
+      `current=${currentEntropy.toFixed(3)}, delta=${delta.toFixed(3)}.`,
+    confidence: 0.8,
+    metadata: {
+      technique: "statistical",
+      drift_type: "entropy_drift",
+      baseline_entropy: baselineEntropy,
+      current_entropy: currentEntropy,
+      delta,
+    },
+  })];
+}
+
+// --- 4. Bound violation ---
+
+function checkBoundViolation(
+  col: string,
+  values: number[],
+  sp: StatProfile,
+): Finding[] {
+  if (sp.bounds === null) return [];
+  const { p01, p99 } = sp.bounds;
+
+  const n = values.length;
+  if (n === 0) return [];
+
+  let violations = 0;
+  for (const v of values) {
+    if (v < p01 || v > p99) violations++;
+  }
+
+  const rate = violations / n;
+  if (rate <= BOUND_VIOLATION_RATE) return [];
+
+  return [drift({
+    severity: Severity.ERROR,
+    column: col,
+    check: "bound_violation",
+    message:
+      `Bound violation on '${col}': ${violations}/${n} values ` +
+      `(${(rate * 100).toFixed(1)}%) outside baseline ` +
+      `p01=${p01.toPrecision(4)} / p99=${p99.toPrecision(4)}.`,
+    affectedRows: violations,
+    confidence: 0.95,
+    metadata: {
+      technique: "statistical",
+      drift_type: "bound_violation",
+      violation_rate: rate,
+      p01,
+      p99,
+    },
+  })];
+}
+
+// --- 5. Benford drift ---
+
+function checkBenfordDrift(
+  col: string,
+  values: number[],
+  sp: StatProfile,
+): Finding[] {
+  if (sp.benford === null) return [];
+
+  const baselinePvalue = sp.benford.chi2_pvalue;
+  const baselineConformed = baselinePvalue >= 0.05;
+
+  const positives = values.filter((v) => v > 0 && Number.isFinite(v));
+  if (positives.length < MIN_ROWS) return [];
+
+  // Check 2+ orders of magnitude
+  const minPos = Math.min(...positives);
+  const maxPos = Math.max(...positives);
+  if (minPos <= 0) return [];
+  const span = Math.log10(maxPos) - Math.log10(minPos);
+  if (span < 2.0) return [];
+
+  const currentPvalue = computeBenfordPvalue(positives);
+  if (currentPvalue === null) return [];
+  const currentConformed = currentPvalue >= 0.05;
+
+  if (baselineConformed === currentConformed) return [];
+
+  const direction = baselineConformed
+    ? "no longer conforms"
+    : "now conforms (unexpected)";
+
+  return [drift({
+    severity: Severity.WARNING,
+    column: col,
+    check: "benford_drift",
+    message:
+      `Benford's law conformance flip on '${col}': baseline p=${baselinePvalue.toFixed(4)}, ` +
+      `current p=${currentPvalue.toFixed(4)} — ${direction}.`,
+    confidence: 0.75,
+    metadata: {
+      technique: "statistical",
+      drift_type: "benford_drift",
+      baseline_pvalue: baselinePvalue,
+      current_pvalue: currentPvalue,
+    },
+  })];
+}
+
+// ---------------------------------------------------------------------------
+// Constraint checks
+// ---------------------------------------------------------------------------
+
+function checkConstraints(data: TabularData, baseline: BaselineProfile): Finding[] {
+  const findings: Finding[] = [];
   findings.push(...checkFdViolations(data, baseline));
   findings.push(...checkKeyUniqueness(data, baseline));
   findings.push(...checkTemporalOrderDrift(data, baseline));
-
-  // Pattern checks
-  findings.push(...checkPatternDrift(data, baseline));
-
-  // Correlation checks
-  findings.push(...checkCorrelationDrift(data, baseline));
-
-  // Type drift
-  findings.push(...checkTypeDrift(data, baseline));
-
   return findings;
 }
 
-function drift(overrides: Partial<Finding> & Pick<Finding, "severity" | "column" | "check" | "message">): Finding {
-  return makeFinding({ ...overrides, source: "baseline_drift" });
-}
-
-// --- Statistical checks ---
-
-function checkDistributionDrift(data: TabularData, col: string, stat: StatProfile): Finding[] {
-  if (!stat.distribution || stat.distribution === "categorical") return [];
-  const currentNums = data.sortedNumeric(col);
-  if (currentNums.length < 10) return [];
-
-  // Need baseline values to compare — reconstruct from bounds
-  if (!stat.bounds) return [];
-  // Use KS test comparing current against uniform approximation from baseline
-  // In practice, we'd compare against the baseline's distribution parameters
-  // For now, check if bounds are violated (simpler drift signal)
-  return [];
-}
-
-function checkEntropyDrift(data: TabularData, col: string, stat: StatProfile): Finding[] {
-  if (stat.entropy === null || stat.entropy === undefined) return [];
-
-  const counts = data.valueCounts(col);
-  if (counts.size === 0) return [];
-  const currentEntropy = calcEntropy(counts);
-  const delta = Math.abs(currentEntropy - stat.entropy);
-
-  if (delta > ENTROPY_DELTA_WARN) {
-    return [drift({
-      severity: Severity.WARNING,
-      column: col,
-      check: "entropy_drift",
-      message: `Entropy changed from ${stat.entropy.toFixed(2)} to ${currentEntropy.toFixed(2)} (delta: ${delta.toFixed(2)} bits)`,
-      confidence: 0.7,
-    })];
-  }
-  return [];
-}
-
-function checkBoundViolation(data: TabularData, col: string, stat: StatProfile): Finding[] {
-  if (!stat.bounds) return [];
-  const nums = data.numericValues(col);
-  if (nums.length === 0) return [];
-
-  const violations = nums.filter((v) => v < stat.bounds!.p01 || v > stat.bounds!.p99);
-  const rate = violations.length / nums.length;
-
-  if (rate > BOUND_VIOLATION_RATE) {
-    return [drift({
-      severity: Severity.ERROR,
-      column: col,
-      check: "bound_violation",
-      message: `${(rate * 100).toFixed(1)}% of values outside baseline p01/p99 bounds [${stat.bounds.p01}, ${stat.bounds.p99}]`,
-      affectedRows: violations.length,
-      sampleValues: violations.slice(0, 5).map(String),
-      confidence: 0.85,
-    })];
-  }
-  return [];
-}
-
-function checkBenfordDrift(data: TabularData, col: string, stat: StatProfile): Finding[] {
-  if (!stat.benford) return [];
-
-  const nums = data.numericValues(col).filter((v) => v > 0);
-  if (nums.length < 30) return [];
-
-  // Check if values span 2+ orders of magnitude
-  const minVal = Math.min(...nums);
-  const maxVal = Math.max(...nums);
-  if (maxVal / Math.max(minVal, 0.001) < 100) return [];
-
-  // Count first digits
-  const digitCounts = new Array(9).fill(0) as number[];
-  for (const v of nums) {
-    const firstDigit = parseInt(String(Math.abs(v))[0]!);
-    if (firstDigit >= 1 && firstDigit <= 9) {
-      digitCounts[firstDigit - 1]!++;
-    }
-  }
-
-  const expected = benfordExpected().map((p) => p * nums.length);
-  const { pValue } = chiSquaredTest(digitCounts, expected);
-  const currentConforming = pValue >= 0.05;
-  const baselineConforming = stat.benford.conforming;
-
-  if (currentConforming !== baselineConforming) {
-    const direction = baselineConforming ? "no longer conforms" : "now conforms";
-    return [drift({
-      severity: Severity.WARNING,
-      column: col,
-      check: "benford_drift",
-      message: `Benford's law conformance changed: column ${direction} to expected distribution`,
-      confidence: 0.6,
-    })];
-  }
-  return [];
-}
-
-// --- Constraint checks ---
+// --- 6. FD violations ---
 
 function checkFdViolations(data: TabularData, baseline: BaselineProfile): Finding[] {
   const findings: Finding[] = [];
+  const nRows = data.rowCount;
+  if (nRows === 0) return [];
 
   for (const fd of baseline.functionalDeps) {
-    if (!data.columns.includes(fd.determinant) || !data.columns.includes(fd.dependent)) continue;
+    const det = fd.determinant;
+    const dep = fd.dependent;
 
-    // Check violation rate
-    const groups = new Map<string, Set<string>>();
+    if (!data.columns.includes(det) || !data.columns.includes(dep)) continue;
+
+    // Group by determinant, check consistency of dependent
+    const groups = new Map<string, Map<string, number>>();
     for (const row of data.rows) {
-      const det = String(row[fd.determinant] ?? "");
-      const dep = String(row[fd.dependent] ?? "");
-      if (!groups.has(det)) groups.set(det, new Set());
-      groups.get(det)!.add(dep);
+      const detVal = String(row[det] ?? "__null__");
+      const depVal = String(row[dep] ?? "__null__");
+
+      let depMap = groups.get(detVal);
+      if (!depMap) {
+        depMap = new Map<string, number>();
+        groups.set(detVal, depMap);
+      }
+      depMap.set(depVal, (depMap.get(depVal) ?? 0) + 1);
     }
 
-    let violations = 0;
-    for (const [, deps] of groups) {
-      if (deps.size > 1) violations++;
+    let consistentCount = 0;
+    for (const depMap of groups.values()) {
+      let maxCount = 0;
+      for (const count of depMap.values()) {
+        if (count > maxCount) maxCount = count;
+      }
+      consistentCount += maxCount;
     }
-    const rate = groups.size > 0 ? violations / groups.size : 0;
 
-    if (rate > FD_VIOLATION_RATE || rate > fd.confidence * FD_VIOLATION_MULTIPLIER) {
-      findings.push(drift({
-        severity: Severity.ERROR,
-        column: `${fd.determinant},${fd.dependent}`,
-        check: "fd_violation",
-        message: `Functional dependency ${fd.determinant} → ${fd.dependent} violated (${(rate * 100).toFixed(1)}% violation rate vs baseline ${((1 - fd.confidence) * 100).toFixed(1)}%)`,
-        affectedRows: violations,
-        confidence: 0.85,
-      }));
-    }
+    const currentConfidence = consistentCount / nRows;
+    const currentViolationRate = 1.0 - currentConfidence;
+    const baselineViolationRate = 1.0 - fd.confidence;
+
+    const triggered =
+      currentViolationRate > FD_VIOLATION_RATE ||
+      (baselineViolationRate > 0 &&
+        currentViolationRate > FD_VIOLATION_MULTIPLIER * baselineViolationRate);
+
+    if (!triggered) continue;
+
+    const affected = nRows - consistentCount;
+    findings.push(drift({
+      severity: Severity.ERROR,
+      column: det,
+      check: "fd_violation",
+      message:
+        `Functional dependency [${det}] -> [${dep}] violated: ` +
+        `violation rate ${(currentViolationRate * 100).toFixed(1)}% ` +
+        `(baseline ${(baselineViolationRate * 100).toFixed(1)}%).`,
+      affectedRows: affected,
+      confidence: 0.9,
+      metadata: {
+        technique: "constraints",
+        drift_type: "fd_violation",
+        determinant: det,
+        dependent: dep,
+        baseline_violation_rate: baselineViolationRate,
+        current_violation_rate: currentViolationRate,
+      },
+    }));
   }
 
   return findings;
 }
+
+// --- 7. Key uniqueness loss ---
 
 function checkKeyUniqueness(data: TabularData, baseline: BaselineProfile): Finding[] {
   const findings: Finding[] = [];
+  const nRows = data.rowCount;
+  if (nRows === 0) return [];
 
-  for (const key of baseline.candidateKeys) {
-    if (!data.columns.includes(key)) continue;
-    const uniquePct = data.nUnique(key) / Math.max(data.dropNulls(key).length, 1);
-    if (uniquePct < 1.0) {
-      findings.push(drift({
-        severity: Severity.ERROR,
-        column: key,
-        check: "key_uniqueness_loss",
-        message: `Candidate key '${key}' lost uniqueness (now ${(uniquePct * 100).toFixed(1)}% unique)`,
-        confidence: 0.9,
-      }));
-    }
+  for (const keyCol of baseline.candidateKeys) {
+    if (!data.columns.includes(keyCol)) continue;
+
+    const nullCount = data.nullCount(keyCol);
+    const nUnique = data.nUnique(keyCol);
+
+    if (nUnique === nRows && nullCount === 0) continue; // Still a valid key
+
+    const duplicates = nRows - nUnique;
+    findings.push(drift({
+      severity: Severity.ERROR,
+      column: keyCol,
+      check: "key_uniqueness_loss",
+      message:
+        `Candidate key [${keyCol}] has lost uniqueness: ` +
+        `${duplicates} duplicate(s) found in ${nRows} rows.`,
+      affectedRows: duplicates,
+      confidence: 0.95,
+      metadata: {
+        technique: "constraints",
+        drift_type: "key_uniqueness_loss",
+        key_column: keyCol,
+        duplicate_count: duplicates,
+      },
+    }));
   }
 
   return findings;
 }
+
+// --- 8. Temporal order drift ---
 
 function checkTemporalOrderDrift(data: TabularData, baseline: BaselineProfile): Finding[] {
   const findings: Finding[] = [];
+  if (data.rowCount === 0) return [];
 
   for (const to of baseline.temporalOrders) {
-    if (!data.columns.includes(to.startCol) || !data.columns.includes(to.endCol)) continue;
+    const colBefore = to.startCol;
+    const colAfter = to.endCol;
 
+    if (!data.columns.includes(colBefore) || !data.columns.includes(colAfter)) continue;
+
+    let validPairs = 0;
     let violations = 0;
-    let total = 0;
+
     for (const row of data.rows) {
-      const s = row[to.startCol];
-      const e = row[to.endCol];
-      if (isNullish(s) || isNullish(e)) continue;
-      total++;
-      const sd = new Date(String(s));
-      const ed = new Date(String(e));
-      if (!isNaN(sd.getTime()) && !isNaN(ed.getTime()) && sd > ed) {
-        violations++;
-      }
+      const aVal = row[colBefore];
+      const bVal = row[colAfter];
+      if (isNullish(aVal) || isNullish(bVal)) continue;
+
+      const aDate = new Date(String(aVal));
+      const bDate = new Date(String(bVal));
+      if (isNaN(aDate.getTime()) || isNaN(bDate.getTime())) continue;
+
+      validPairs++;
+      if (aDate > bDate) violations++;
     }
 
-    const rate = total > 0 ? violations / total : 0;
-    if (rate > TEMPORAL_VIOLATION_RATE || rate > to.violationRate * TEMPORAL_VIOLATION_MULTIPLIER) {
+    if (validPairs === 0) continue;
+
+    const currentViolationRate = violations / validPairs;
+    const baselineViolationRate = to.violationRate;
+
+    const triggered =
+      currentViolationRate > TEMPORAL_VIOLATION_RATE ||
+      (baselineViolationRate > 0 &&
+        currentViolationRate > TEMPORAL_VIOLATION_MULTIPLIER * baselineViolationRate);
+
+    if (!triggered) continue;
+
+    findings.push(drift({
+      severity: Severity.WARNING,
+      column: colBefore,
+      check: "temporal_order_drift",
+      message:
+        `Temporal order drift: '${colBefore}' should be before '${colAfter}', ` +
+        `but violation rate is ${(currentViolationRate * 100).toFixed(1)}% ` +
+        `(baseline ${(baselineViolationRate * 100).toFixed(1)}%).`,
+      affectedRows: violations,
+      confidence: 0.85,
+      metadata: {
+        technique: "constraints",
+        drift_type: "temporal_order_drift",
+        before: colBefore,
+        after: colAfter,
+        baseline_violation_rate: baselineViolationRate,
+        current_violation_rate: currentViolationRate,
+      },
+    }));
+  }
+
+  return findings;
+}
+
+// ---------------------------------------------------------------------------
+// Pattern checks
+// ---------------------------------------------------------------------------
+
+// --- 9. Pattern drift + 10. New pattern ---
+
+function checkPatterns(data: TabularData, baseline: BaselineProfile): Finding[] {
+  const findings: Finding[] = [];
+
+  for (const [col, baseGrammars] of Object.entries(baseline.patterns)) {
+    if (!data.columns.includes(col)) continue;
+    if (!data.isString(col)) continue;
+
+    const values = data.stringValues(col);
+    if (values.length < MIN_ROWS) continue;
+
+    const currentGrammars = induceColumnGrammars(col, values);
+    const currentPatternMap = new Map<string, number>();
+    for (const g of currentGrammars) {
+      currentPatternMap.set(g.regex, g.coverage);
+    }
+
+    if (baseGrammars.length === 0) continue;
+    const baseGrammar = baseGrammars[0]!;
+    const baselinePattern = baseGrammar.regex;
+    const baselineCoverage = baseGrammar.coverage;
+
+    // 9. pattern_drift: check if baseline pattern's coverage has dropped
+    const currentCoverage = currentPatternMap.get(baselinePattern) ?? 0;
+    const coverageDrop = baselineCoverage - currentCoverage;
+    if (coverageDrop > PATTERN_COVERAGE_DROP) {
       findings.push(drift({
         severity: Severity.WARNING,
-        column: `${to.startCol},${to.endCol}`,
-        check: "temporal_order_drift",
-        message: `Temporal order violation rate increased: ${(rate * 100).toFixed(1)}% vs baseline ${(to.violationRate * 100).toFixed(1)}%`,
-        affectedRows: violations,
-        confidence: 0.7,
-      }));
-    }
-  }
-
-  return findings;
-}
-
-// --- Pattern checks ---
-
-function checkPatternDrift(data: TabularData, baseline: BaselineProfile): Finding[] {
-  const findings: Finding[] = [];
-
-  for (const [col, patterns] of Object.entries(baseline.patterns)) {
-    if (!data.columns.includes(col)) continue;
-    const nonNull = data.stringValues(col);
-    if (nonNull.length === 0) continue;
-
-    for (const pattern of patterns) {
-      const re = new RegExp(pattern.regex);
-      const matchCount = nonNull.filter((v) => re.test(v)).length;
-      const currentCoverage = matchCount / nonNull.length;
-      const drop = pattern.coverage - currentCoverage;
-
-      if (drop > PATTERN_COVERAGE_DROP) {
-        findings.push(drift({
-          severity: Severity.WARNING,
-          column: col,
-          check: "pattern_drift",
-          message: `Pattern '${pattern.regex}' coverage dropped from ${(pattern.coverage * 100).toFixed(1)}% to ${(currentCoverage * 100).toFixed(1)}%`,
-          confidence: 0.6,
-        }));
-      }
-    }
-
-    // Check for new patterns not in baseline
-    const baselineRegexes = new Set(patterns.map((p) => p.regex));
-    // Simple check: are there values that don't match any baseline pattern?
-    const unmatchedCount = nonNull.filter((v) => {
-      return !patterns.some((p) => new RegExp(p.regex).test(v));
-    }).length;
-    const unmatchedRate = unmatchedCount / nonNull.length;
-    if (unmatchedRate > PATTERN_NEW_COVERAGE) {
-      findings.push(drift({
-        severity: Severity.INFO,
         column: col,
-        check: "new_pattern",
-        message: `${(unmatchedRate * 100).toFixed(1)}% of values don't match any baseline pattern`,
-        affectedRows: unmatchedCount,
-        confidence: 0.5,
+        check: "pattern_drift",
+        message:
+          `Pattern coverage drop on '${col}': baseline pattern ` +
+          `'${baselinePattern}' covered ${(baselineCoverage * 100).toFixed(1)}%, ` +
+          `now ${(currentCoverage * 100).toFixed(1)}% (drop=${(coverageDrop * 100).toFixed(1)}%).`,
+        confidence: 0.8,
+        metadata: {
+          technique: "patterns",
+          drift_type: "pattern_drift",
+          pattern: baselinePattern,
+          baseline_coverage: baselineCoverage,
+          current_coverage: currentCoverage,
+          drop: coverageDrop,
+        },
       }));
     }
-  }
 
-  return findings;
-}
-
-// --- Correlation checks ---
-
-function checkCorrelationDrift(data: TabularData, baseline: BaselineProfile): Finding[] {
-  const findings: Finding[] = [];
-
-  for (const corr of baseline.correlations) {
-    if (!data.columns.includes(corr.col1) || !data.columns.includes(corr.col2)) continue;
-
-    let currentValue: number | null = null;
-    if (corr.method === "pearson") {
-      const nums1 = data.numericValues(corr.col1);
-      const nums2 = data.numericValues(corr.col2);
-      currentValue = pearson(nums1, nums2);
-    }
-    // Cramér's V would require contingency table — skip for now
-
-    if (currentValue !== null) {
-      const drop = Math.abs(corr.value) - Math.abs(currentValue);
-      if (drop > CORR_DROP_THRESHOLD && corr.strength === "strong") {
-        findings.push(drift({
-          severity: Severity.WARNING,
-          column: `${corr.col1},${corr.col2}`,
-          check: "correlation_break",
-          message: `Correlation between ${corr.col1} and ${corr.col2} dropped from ${corr.value.toFixed(2)} to ${currentValue.toFixed(2)}`,
-          confidence: 0.6,
-        }));
-      }
-    }
-  }
-
-  // Check for new strong correlations not in baseline
-  const baselineCorrs = new Set(
-    baseline.correlations.map((c) => [c.col1, c.col2].sort().join("|")),
-  );
-  const numCols = data.columns.filter((c) => data.isNumeric(c));
-  for (let i = 0; i < numCols.length && i < 20; i++) {
-    for (let j = i + 1; j < numCols.length && j < 20; j++) {
-      const key = [numCols[i]!, numCols[j]!].sort().join("|");
-      if (baselineCorrs.has(key)) continue;
-      const nums1 = data.numericValues(numCols[i]!);
-      const nums2 = data.numericValues(numCols[j]!);
-      const r = pearson(nums1, nums2);
-      if (r !== null && Math.abs(r) >= CORR_STRONG_THRESHOLD) {
+    // 10. new_pattern: INFO for new format variants with > 5% coverage not in baseline
+    const baselinePatterns = new Set(baseGrammars.map((g) => g.regex));
+    for (const g of currentGrammars) {
+      if (!baselinePatterns.has(g.regex) && g.coverage > PATTERN_NEW_COVERAGE) {
         findings.push(drift({
           severity: Severity.INFO,
-          column: `${numCols[i]},${numCols[j]}`,
-          check: "new_correlation",
-          message: `New strong correlation detected (r=${r.toFixed(2)}) not present in baseline`,
-          confidence: 0.5,
+          column: col,
+          check: "new_pattern",
+          message:
+            `New format variant on '${col}': pattern '${g.regex}' covers ` +
+            `${(g.coverage * 100).toFixed(1)}% of current data (not in baseline).`,
+          confidence: 0.7,
+          metadata: {
+            technique: "patterns",
+            drift_type: "new_pattern",
+            pattern: g.regex,
+            coverage: g.coverage,
+          },
         }));
       }
     }
@@ -370,25 +628,353 @@ function checkCorrelationDrift(data: TabularData, baseline: BaselineProfile): Fi
   return findings;
 }
 
-// --- Type drift ---
+// ---------------------------------------------------------------------------
+// Correlation checks
+// ---------------------------------------------------------------------------
 
-function checkTypeDrift(data: TabularData, baseline: BaselineProfile): Finding[] {
+// --- 11. Correlation break + 12. New correlation ---
+
+function checkCorrelations(data: TabularData, baseline: BaselineProfile): Finding[] {
+  const findings: Finding[] = [];
+
+  // Build lookup of baseline correlations
+  const baselineLookup = new Map<string, CorrelationEntry>();
+  for (const entry of baseline.correlations) {
+    const key = `${entry.col1}\0${entry.col2}`;
+    baselineLookup.set(key, entry);
+  }
+
+  // 11. Check existing baseline correlations for breaks
+  for (const [key, baseEntry] of baselineLookup) {
+    const [colA, colB] = key.split("\0") as [string, string];
+    if (!data.columns.includes(colA) || !data.columns.includes(colB)) continue;
+
+    const currentValue = computeCorrelation(data, colA, colB, baseEntry.method);
+    if (currentValue === null) continue;
+
+    // correlation_break: WARNING if strong correlation drops > 0.1
+    if (
+      baseEntry.strength === "strong" &&
+      baseEntry.value - currentValue > CORR_DROP_THRESHOLD
+    ) {
+      const drop = baseEntry.value - currentValue;
+      findings.push(drift({
+        severity: Severity.WARNING,
+        column: colA,
+        check: "correlation_break",
+        message:
+          `Correlation break between '${colA}' and '${colB}': ` +
+          `baseline=${baseEntry.value.toFixed(3)}, current=${currentValue.toFixed(3)} ` +
+          `(drop=${drop.toFixed(3)}, measure=${baseEntry.method}).`,
+        confidence: 0.8,
+        metadata: {
+          technique: "correlations",
+          drift_type: "correlation_break",
+          columns: [colA, colB],
+          measure: baseEntry.method,
+          baseline_value: baseEntry.value,
+          current_value: currentValue,
+          drop,
+        },
+      }));
+    }
+  }
+
+  // 12. new_correlation: INFO for newly emerged strong correlations not in baseline
+  const numericCols = data.columns.filter((c) => {
+    const dt = data.dtype(c);
+    return dt === "integer" || dt === "float";
+  });
+
+  let checked = 0;
+  for (let i = 0; i < numericCols.length && checked < 200; i++) {
+    for (let j = i + 1; j < numericCols.length && checked < 200; j++) {
+      const colA = numericCols[i]!;
+      const colB = numericCols[j]!;
+      const sortedKey =
+        colA < colB ? `${colA}\0${colB}` : `${colB}\0${colA}`;
+
+      if (baselineLookup.has(sortedKey)) continue;
+      checked++;
+
+      const currentValue = computeCorrelation(data, colA, colB, "pearson");
+      if (currentValue !== null && Math.abs(currentValue) >= CORR_STRONG_THRESHOLD) {
+        findings.push(drift({
+          severity: Severity.INFO,
+          column: colA,
+          check: "new_correlation",
+          message:
+            `New strong correlation emerged between '${colA}' and '${colB}': ` +
+            `r=${currentValue.toFixed(3)} (not present in baseline).`,
+          confidence: 0.7,
+          metadata: {
+            technique: "correlations",
+            drift_type: "new_correlation",
+            columns: [colA, colB],
+            measure: "pearson",
+            current_value: currentValue,
+          },
+        }));
+      }
+    }
+  }
+
+  return findings;
+}
+
+function computeCorrelation(
+  data: TabularData,
+  colA: string,
+  colB: string,
+  method: "pearson" | "cramers_v",
+): number | null {
+  if (method === "pearson") {
+    const aValues: number[] = [];
+    const bValues: number[] = [];
+    for (const row of data.rows) {
+      const a = row[colA];
+      const b = row[colB];
+      if (a === null || a === undefined || b === null || b === undefined) continue;
+      const an = Number(a);
+      const bn = Number(b);
+      if (!Number.isFinite(an) || !Number.isFinite(bn)) continue;
+      aValues.push(an);
+      bValues.push(bn);
+    }
+    if (aValues.length < MIN_ROWS) return null;
+    return pearson(aValues, bValues);
+  }
+
+  if (method === "cramers_v") {
+    const contingency = new Map<string, Map<string, number>>();
+    let validCount = 0;
+    for (const row of data.rows) {
+      const a = row[colA];
+      const b = row[colB];
+      if (a === null || a === undefined || b === null || b === undefined) continue;
+      const aStr = String(a);
+      const bStr = String(b);
+      let bMap = contingency.get(aStr);
+      if (!bMap) {
+        bMap = new Map<string, number>();
+        contingency.set(aStr, bMap);
+      }
+      bMap.set(bStr, (bMap.get(bStr) ?? 0) + 1);
+      validCount++;
+    }
+    if (validCount < MIN_ROWS) return null;
+    return cramersV(contingency);
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Semantic checks
+// ---------------------------------------------------------------------------
+
+// --- 13. Type drift ---
+
+function checkSemantic(data: TabularData, baseline: BaselineProfile): Finding[] {
+  if (!baseline.semanticTypes || Object.keys(baseline.semanticTypes).length === 0) {
+    return [];
+  }
+
   const findings: Finding[] = [];
 
   for (const [col, baselineType] of Object.entries(baseline.semanticTypes)) {
     if (!data.columns.includes(col)) continue;
+
     const currentType = data.dtype(col);
-    // Simple type comparison
-    if (currentType !== baselineType && baselineType !== "unknown") {
-      findings.push(drift({
-        severity: Severity.WARNING,
-        column: col,
-        check: "type_drift",
-        message: `Column type changed from '${baselineType}' to '${currentType}'`,
-        confidence: 0.6,
-      }));
-    }
+    // Map dtype to a comparable semantic type string
+    const currentSemanticType = dtypeToSemanticType(currentType);
+
+    if (currentSemanticType === null || currentSemanticType === baselineType) continue;
+
+    findings.push(drift({
+      severity: Severity.WARNING,
+      column: col,
+      check: "type_drift",
+      message:
+        `Semantic type drift on '${col}': baseline type was '${baselineType}', ` +
+        `now inferred as '${currentSemanticType}'.`,
+      confidence: 0.75,
+      metadata: {
+        technique: "semantic",
+        drift_type: "type_drift",
+        baseline_type: baselineType,
+        current_type: currentSemanticType,
+      },
+    }));
   }
 
   return findings;
+}
+
+function dtypeToSemanticType(dtype: string): string | null {
+  switch (dtype) {
+    case "integer":
+    case "float":
+      return "numeric";
+    case "string":
+      return "string";
+    case "boolean":
+      return "boolean";
+    case "date":
+      return "date";
+    case "datetime":
+      return "datetime";
+    default:
+      return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers — synthetic sorted sample generators (inverse CDF / quantile)
+// ---------------------------------------------------------------------------
+
+function generateNormalSorted(n: number, loc: number, scale: number): number[] {
+  const result: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const p = (i + 0.5) / n;
+    result.push(loc + scale * normalQuantile(p));
+  }
+  return result;
+}
+
+function generateLogNormalSorted(n: number, logMean: number, logStd: number): number[] {
+  const result: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const p = (i + 0.5) / n;
+    result.push(Math.exp(logMean + logStd * normalQuantile(p)));
+  }
+  return result;
+}
+
+function generateExponentialSorted(n: number, loc: number, scale: number): number[] {
+  const result: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const p = (i + 0.5) / n;
+    result.push(loc - scale * Math.log(1 - p));
+  }
+  return result;
+}
+
+function generateUniformSorted(n: number, loc: number, scale: number): number[] {
+  const result: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const p = (i + 0.5) / n;
+    result.push(loc + scale * p);
+  }
+  return result;
+}
+
+/** Approximate inverse normal CDF (Acklam's rational approximation). */
+function normalQuantile(p: number): number {
+  if (p <= 0) return -Infinity;
+  if (p >= 1) return Infinity;
+  if (p === 0.5) return 0;
+
+  const a1 = -3.969683028665376e+01;
+  const a2 = 2.209460984245205e+02;
+  const a3 = -2.759285104469687e+02;
+  const a4 = 1.383577518672690e+02;
+  const a5 = -3.066479806614716e+01;
+  const a6 = 2.506628277459239e+00;
+
+  const b1 = -5.447609879822406e+01;
+  const b2 = 1.615858368580409e+02;
+  const b3 = -1.556989798598866e+02;
+  const b4 = 6.680131188771972e+01;
+  const b5 = -1.328068155288572e+01;
+
+  const c1 = -7.784894002430293e-03;
+  const c2 = -3.223964580411365e-01;
+  const c3 = -2.400758277161838e+00;
+  const c4 = -2.549732539343734e+00;
+  const c5 = 4.374664141464968e+00;
+  const c6 = 2.938163982698783e+00;
+
+  const d1 = 7.784695709041462e-03;
+  const d2 = 3.224671290700398e-01;
+  const d3 = 2.445134137142996e+00;
+  const d4 = 3.754408661907416e+00;
+
+  const pLow = 0.02425;
+  const pHigh = 1 - pLow;
+
+  if (p < pLow) {
+    const q = Math.sqrt(-2 * Math.log(p));
+    return (((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6) /
+           ((((d1 * q + d2) * q + d3) * q + d4) * q + 1);
+  } else if (p <= pHigh) {
+    const q = p - 0.5;
+    const r = q * q;
+    return (((((a1 * r + a2) * r + a3) * r + a4) * r + a5) * r + a6) * q /
+           (((((b1 * r + b2) * r + b3) * r + b4) * r + b5) * r + 1);
+  } else {
+    const q = Math.sqrt(-2 * Math.log(1 - p));
+    return -(((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6) /
+            ((((d1 * q + d2) * q + d3) * q + d4) * q + 1);
+  }
+}
+
+/** Compute approximate Shannon entropy using a histogram (Sturges' rule bins). */
+function histogramEntropy(values: number[]): number {
+  const n = values.length;
+  if (n === 0) return 0;
+
+  const nBins = Math.max(10, Math.min(100, Math.ceil(Math.log2(n) + 1)));
+
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of values) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  if (min === max) return 0;
+
+  const binWidth = (max - min) / nBins;
+  const counts = new Array<number>(nBins).fill(0);
+
+  for (const v of values) {
+    let bin = Math.floor((v - min) / binWidth);
+    if (bin >= nBins) bin = nBins - 1;
+    counts[bin]!++;
+  }
+
+  let ent = 0;
+  for (const c of counts) {
+    if (c > 0) {
+      const p = c / n;
+      ent -= p * Math.log2(p);
+    }
+  }
+  return ent;
+}
+
+/** Compute Benford's law chi-squared p-value. Returns null on failure. */
+function computeBenfordPvalue(values: number[]): number | null {
+  const leadingDigits: number[] = [];
+  for (const v of values) {
+    if (v <= 0 || !Number.isFinite(v)) continue;
+    const exp = Math.floor(Math.log10(v));
+    const normalised = v / 10 ** exp;
+    const d = Math.floor(normalised);
+    if (d >= 1 && d <= 9) leadingDigits.push(d);
+  }
+
+  if (leadingDigits.length === 0) return null;
+
+  const total = leadingDigits.length;
+  const digitCounts = new Array<number>(9).fill(0);
+  for (const d of leadingDigits) {
+    digitCounts[d - 1]!++;
+  }
+
+  const expectedProps = benfordExpected();
+  const expectedCounts = expectedProps.map((p) => p * total);
+
+  const { pValue } = chiSquaredTest(digitCounts, expectedCounts);
+  return pValue;
 }

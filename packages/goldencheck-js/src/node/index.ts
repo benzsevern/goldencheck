@@ -14,3 +14,12 @@ export { watchDirectory, type WatchOptions } from "./watcher.js";
 
 // Node-only: MCP server
 export { TOOL_DEFINITIONS, handleTool } from "./mcp/server.js";
+
+// Node-only: TUI renderer
+export { renderTui } from "./tui/app.js";
+
+// Node-only: database scanner
+export { scanDatabase } from "./db-scanner.js";
+
+// Node-only: A2A server
+export { runA2aServer } from "./a2a/server.js";

@@ -56,6 +56,27 @@ export { maybeSample } from "./engine/sampler.js";
 export { applyCorroborationBoost, applyConfidenceDowngrade } from "./engine/confidence.js";
 export { applyFixes, type FixEntry, type FixReport } from "./engine/fixer.js";
 export { diffData, formatDiffReport, type DiffReport, type SchemaChange, type FindingChange, type StatChange } from "./engine/differ.js";
+export { autoTriage, type TriageResult } from "./engine/triage.js";
+export { recordScan, loadHistory, getPreviousScan, type ScanRecord } from "./engine/history.js";
+export { shouldNotify, sendWebhook } from "./engine/notifier.js";
+export { runSchedule, type ScheduleOptions } from "./engine/scheduler.js";
+
+// Agent
+export {
+  type StrategyDecision,
+  selectStrategy,
+  buildAlternatives,
+  explainFinding,
+  explainColumn,
+  compareDomains,
+  findingsToFbc,
+  type GenerateHandoffOptions,
+  generateHandoff,
+  type ReviewItem,
+  type ReviewQueueStats,
+  type ClassifyResult,
+  ReviewQueue,
+} from "./agent/index.js";
 
 // Config
 export { validateConfig } from "./config/schema.js";
@@ -99,3 +120,6 @@ export { classifyColumns, loadTypeDefs, matchByName } from "./semantic/classifie
 export { applySuppression } from "./semantic/suppression.js";
 export { BASE_TYPES } from "./semantic/types.js";
 export { listAvailableDomains, getDomainTypes, DOMAIN_REGISTRY } from "./semantic/domains/index.js";
+
+// Notebook / HTML rendering
+export { ScanResult as ScanResultHtml, findingsToHtml, profileToHtml } from "./notebook.js";
