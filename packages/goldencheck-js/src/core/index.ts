@@ -54,6 +54,39 @@ export {
 export { scanData, type ScanOptions, type ScanResultWithSample } from "./engine/scanner.js";
 export { maybeSample } from "./engine/sampler.js";
 export { applyCorroborationBoost, applyConfidenceDowngrade } from "./engine/confidence.js";
+export { applyFixes, type FixEntry, type FixReport } from "./engine/fixer.js";
+export { diffData, formatDiffReport, type DiffReport, type SchemaChange, type FindingChange, type StatChange } from "./engine/differ.js";
+
+// Config
+export { validateConfig } from "./config/schema.js";
+
+// Reporters
+export { reportJson } from "./reporters/json.js";
+export { ciCheck } from "./reporters/ci.js";
+
+// LLM
+export { callLlm, checkLlmAvailable } from "./llm/providers.js";
+export { parseLlmResponse } from "./llm/parser.js";
+export { mergeLlmFindings } from "./llm/merger.js";
+export { buildSampleBlocks } from "./llm/sample-block.js";
+export { estimateCost, checkBudget, CostReport } from "./llm/budget.js";
+export type { LLMResponse, LLMColumnAssessment, LLMRelation } from "./llm/prompts.js";
+
+// Baseline
+export { createBaseline } from "./baseline/index.js";
+export {
+  type BaselineProfile,
+  type StatProfile,
+  type ConfidencePrior,
+  serializeBaseline,
+  deserializeBaseline,
+} from "./baseline/models.js";
+
+// Drift
+export { runDriftChecks } from "./drift/detector.js";
+
+// Validator
+export { validateData } from "./engine/validator.js";
 
 // Profilers
 export { COLUMN_PROFILERS, type Profiler, type RelationProfiler, generalize } from "./profilers/index.js";
