@@ -1,3 +1,5 @@
+> **Moved.** This repo has moved into the [`benzsevern/goldenmatch`](https://github.com/benzsevern/goldenmatch) monorepo at `packages/python/goldencheck (and packages/typescript/goldencheck)/`. This repo is archived; new development happens in the monorepo.
+
 <!-- mcp-name: io.github.benzsevern/goldencheck -->
 # GoldenCheck
 
